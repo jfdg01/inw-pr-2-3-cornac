@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Experiment logs (auto-generated)
+CornacExp-*.log
+
+# Cache / pickle files
+*.pkl
+*.pickle
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
