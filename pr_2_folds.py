@@ -22,6 +22,92 @@ from cornac.metrics import MAE, RMSE, Precision, Recall, FMeasure, NDCG
 
 warnings.filterwarnings('ignore')
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# SVD++ (cornac lacks it; implemented here via SGD)
+# r̂(u,i) = μ + b_u + b_i + q_i^T (p_u + |I_u|^(-1/2) Σ_{j∈I_u} y_j)
+# ══════════════════════════════════════════════════════════════════════════
+class SVDpp(Recommender):
+
+    def __init__(self, k=20, n_epochs=20, lr=0.005, reg=0.02, name=None, seed=None):
+        super().__init__(name=name or f'SVDpp k={k}', trainable=True)
+        self.k = k
+        self.n_epochs = n_epochs
+        self.lr = lr
+        self.reg = reg
+        self.seed = seed
+
+    def fit(self, train_set, val_set=None):
+        super().fit(train_set, val_set)
+        rng = np.random.RandomState(self.seed)
+
+        n_users = train_set.num_users
+        n_items = train_set.num_items
+        mu = train_set.global_mean
+        k, lr, reg = self.k, self.lr, self.reg
+
+        P  = rng.normal(0, 0.1, (n_users, k))
+        Q  = rng.normal(0, 0.1, (n_items, k))
+        Y  = rng.normal(0, 0.1, (n_items, k))
+        bu = np.zeros(n_users)
+        bi = np.zeros(n_items)
+
+        u_arr, i_arr, r_arr = train_set.uir_tuple
+        u_arr = u_arr.astype(np.int32)
+        i_arr = i_arr.astype(np.int32)
+
+        # items rated by each user as numpy arrays (for fast sum)
+        user_items = defaultdict(list)
+        for u, i in zip(u_arr, i_arr):
+            user_items[int(u)].append(int(i))
+        user_items_np = {u: np.array(v, dtype=np.int32) for u, v in user_items.items()}
+
+        indices = np.arange(len(u_arr))
+        for _ in range(self.n_epochs):
+            rng.shuffle(indices)
+            for idx in indices:
+                u = int(u_arr[idx])
+                i = int(i_arr[idx])
+                r = float(r_arr[idx])
+
+                Iu = user_items_np.get(u)
+                if Iu is not None and len(Iu) > 0:
+                    sqrt_Iu = 1.0 / np.sqrt(len(Iu))
+                    sum_y = Y[Iu].sum(axis=0)
+                else:
+                    sqrt_Iu = 1.0
+                    sum_y = np.zeros(k)
+
+                p_tilde = P[u] + sqrt_Iu * sum_y
+                e = r - (mu + bu[u] + bi[i] + Q[i].dot(p_tilde))
+                elr = lr * e
+
+                bu[u] += elr - lr * reg * bu[u]
+                bi[i] += elr - lr * reg * bi[i]
+
+                Qi = Q[i].copy()
+                Q[i]  += elr * p_tilde - lr * reg * Q[i]
+                P[u]  += elr * Qi - lr * reg * P[u]
+                if Iu is not None and len(Iu) > 0:
+                    Y[Iu] += elr * sqrt_Iu * Qi - lr * reg * Y[Iu]
+
+        self.mu, self.P, self.Q, self.Y = mu, P, Q, Y
+        self.bu, self.bi = bu, bi
+        self.user_items_np = user_items_np
+        self._min_r, self._max_r = train_set.min_rating, train_set.max_rating
+        return self
+
+    def score(self, user_idx, item_idx=None):
+        Iu = self.user_items_np.get(user_idx)
+        sqrt_Iu = 1.0 / np.sqrt(len(Iu)) if (Iu is not None and len(Iu) > 0) else 1.0
+        sum_y = self.Y[Iu].sum(axis=0) if (Iu is not None and len(Iu) > 0) else np.zeros(self.k)
+        p_tilde = self.P[user_idx] + sqrt_Iu * sum_y
+        if item_idx is None:
+            scores = self.mu + self.bu[user_idx] + self.bi + self.Q.dot(p_tilde)
+            return np.clip(scores, self._min_r, self._max_r)
+        s = self.mu + self.bu[user_idx] + self.bi[item_idx] + self.Q[item_idx].dot(p_tilde)
+        return float(np.clip(s, self._min_r, self._max_r))
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 BASE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rs-movie-cour')
 FOLDS_DIR = os.path.join(BASE, 'rs-cour-dataset-validation')
@@ -165,6 +251,8 @@ def make_models():
             models.append(ItemKNN(k=k, similarity=sim, name=f'ItemKNN k={k} {sim}', seed=SEED))
     for nf in [5, 10, 20, 30]:
         models.append(SVD(k=nf, name=f'SVD f={nf}', seed=SEED))
+    for nf in [5, 10, 20, 30]:
+        models.append(SVDpp(k=nf, name=f'SVDpp f={nf}', seed=SEED))
     models.append(ContentBasedTFIDF(tags_path=PATH_TAGS, titles_path=PATH_TITLES))
     return models
 
